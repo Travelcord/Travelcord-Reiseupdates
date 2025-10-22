@@ -7,7 +7,7 @@ import country_converter as coco
 FEED_URL = "https://www.auswaertiges-amt.de/static/includes/rss/Reisehinweise-RSS-Feed.xml"
 STATE_PATH = pathlib.Path("state.json")
 MAX_POSTS_PER_RUN = 10
-WARM_START = True  # erster Lauf: nur "gesehen" markieren, keine Posts
+WARM_START = False
 
 BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 FORUM_IDS = {
