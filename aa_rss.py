@@ -75,7 +75,7 @@ def forum_post(channel_id: str, title: str, content: str):
     headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
     payload = {
         "name": title[:95],
-        "auto_archive_duration": 10080,  # 7 Tage
+        "auto_archive_duration": 10080,
         "message": {"content": content}
     }
     r = requests.post(url, headers=headers, json=payload, timeout=20)
@@ -90,9 +90,9 @@ def load_entries():
     if n > 0:
         return list(reversed(f.entries))
 
-    # HTML-Fallback: Länder-Liste von der offiziellen AA-Seite
+    # HTML-Fallback: Länderinformationen-Seite
     base = "https://www.auswaertiges-amt.de"
-    url = f"{base}/de/ReiseUndSicherheit/laenderreiseliste-node"
+    url = f"{base}/de/ReiseUndSicherheit/laenderinformationen"
     r = requests.get(url, timeout=20, headers={"User-Agent": "TravelcordBot"})
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
@@ -113,7 +113,7 @@ def load_entries():
         e.summary = ""
         e.id = link
         entries.append(e)
-        if len(entries) >= 25:
+        if len(entries) >= 30:
             break
 
     print(f"HTML fallback entries: {len(entries)}")
