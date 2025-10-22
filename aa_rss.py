@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import requests, feedparser
 from bs4 import BeautifulSoup
 import country_converter as coco
+import xml.etree.ElementTree as ET
 
 # ----- Konfiguration -----
 FEED_URL = "https://www.auswaertiges-amt.de/de/ReiseUndSicherheit/-/RSS"
@@ -12,12 +13,12 @@ WARM_START = False  # auf True stellen, wenn du nur "merken" willst
 
 BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 FORUM_IDS = {
-    "Europe":              "1425595421325131787",
-    "Africa":              "1425595490556448828",
-    "Asia":                "1425595458180616305",
-    "Oceania":             "1425595652091674655",
-    "NorthAmerica":        "1425595550392127570",
-    "CentralSouthAmerica": "1425595599914406038",
+    "Europe":              "1430673385855385703",
+    "Africa":              "1430673454457290863",
+    "Asia":                "1430673642949181501",
+    "NorthAmerica":        "1430673563160940644",
+    "CentralSouthAmerica": "1430673715598721197",
+    "Oceania":             "1430673765855002714",
 }
 
 cc = coco.CountryConverter(include_obsolete=True)
@@ -44,11 +45,14 @@ def clean_text(html, limit=550):
 
 def load_seen():
     if STATE_PATH.exists():
-        try: return set(json.loads(STATE_PATH.read_text()))
-        except: return set()
+        try:
+            return set(json.loads(STATE_PATH.read_text()))
+        except:
+            return set()
     return set()
 
-def save_seen(seen): STATE_PATH.write_text(json.dumps(list(seen))[:200000])
+def save_seen(seen):
+    STATE_PATH.write_text(json.dumps(list(seen))[:200000])
 
 def extract_country(title: str, link: str) -> str | None:
     m = re.match(r"^\s*([^:\-–—]+)", title or "", re.I)
@@ -82,7 +86,7 @@ def forum_post(channel_id: str, title: str, content: str):
     if r.status_code >= 300:
         raise RuntimeError(f"Discord API error {r.status_code}: {r.text}")
 
-# ----- Feed & Fallback -----
+# ----- Feed & Sitemap-Fallback -----
 def load_entries():
     f = feedparser.parse(FEED_URL)
     n = len(f.entries or [])
@@ -90,33 +94,50 @@ def load_entries():
     if n > 0:
         return list(reversed(f.entries))
 
-    # HTML-Fallback: Länderinformationen-Seite
+    # Sitemap-Fallback: zuverlässig alle Länder
     base = "https://www.auswaertiges-amt.de"
-    url = f"{base}/de/ReiseUndSicherheit/laenderinformationen"
-    r = requests.get(url, timeout=20, headers={"User-Agent": "TravelcordBot"})
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
+    sm_index = f"{base}/sitemap.xml"
+    hdr = {"User-Agent": "TravelcordBot", "Accept-Language": "de-DE,de;q=0.9"}
+
+    def get(url):
+        r = requests.get(url, headers=hdr, timeout=30)
+        r.raise_for_status()
+        return r.text
+
+    xml_index = get(sm_index)
+    root = ET.fromstring(xml_index)
+    ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+    sitemaps = [e.find("sm:loc", ns).text for e in root.findall("sm:sitemap", ns) if e.find("sm:loc", ns) is not None]
+    rus_maps = [u for u in sitemaps if "/ReiseUndSicherheit/" in u or "/reiseundsicherheit/" in u.lower()]
+    print(f"Sitemaps total: {len(sitemaps)} | R+S maps: {len(rus_maps)}")
+
+    urls = []
+    for sm in rus_maps or sitemaps:
+        try:
+            xml_sm = get(sm)
+            rroot = ET.fromstring(xml_sm)
+            for urlnode in rroot.findall("sm:url", ns):
+                loc = urlnode.find("sm:loc", ns)
+                if not loc is None:
+                    u = loc.text
+                    if "/de/ReiseUndSicherheit/" in u:
+                        urls.append(u)
+        except Exception as ex:
+            print(f"map parse fail: {sm} -> {ex}")
+
+    urls = list(dict.fromkeys(urls))[:200]
+    print(f"Sitemap URLs (R+S): {len(urls)}")
 
     entries = []
-    for a in soup.select('a[href*="/de/ReiseUndSicherheit/"]'):
-        title = a.get_text(" ", strip=True)
-        link = urllib.parse.urljoin(base, a.get("href", ""))
-        if not title or len(title) < 3:
-            continue
-        if any(bad in title.lower() for bad in ["navigation", "datenschutz", "barriere", "impressum", "kontakt"]):
-            continue
-        if not link.startswith(f"{base}/de/ReiseUndSicherheit/"):
-            continue
+    for u in urls:
+        title = u.rsplit("/", 1)[-1].replace("-", " ").title()
         e = type("E", (), {})()
         e.title = title
-        e.link = link
+        e.link = u
         e.summary = ""
-        e.id = link
+        e.id = u
         entries.append(e)
-        if len(entries) >= 30:
-            break
 
-    print(f"HTML fallback entries: {len(entries)}")
     return entries
 
 # ----- Hauptablauf -----
