@@ -4,10 +4,10 @@ from bs4 import BeautifulSoup
 import country_converter as coco
 
 # ----- Konfiguration -----
-FEED_URL = "https://www.auswaertiges-amt.de/de/ReiseUndSicherheit/-/RSS"
+FEED_URL = "https://www.auswaertiges-amt.de/static/includes/rss/Reisehinweise-RSS-Feed.xml"
 STATE_PATH = pathlib.Path("state.json")
 MAX_POSTS_PER_RUN = 10
-WARM_START = False
+WARM_START = True  # erster Lauf: nur "gesehen" markieren, keine Posts
 
 BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 FORUM_IDS = {
@@ -19,8 +19,10 @@ FORUM_IDS = {
     "Oceania":             "1430673765855002714",
 }
 
+# CountryConverter ohne language-Arg
 cc = coco.CountryConverter(include_obsolete=True)
 
+# Sonderfälle / Territorien
 MANUAL_MAP = {
     "UK": "Europe", "Großbritannien": "Europe", "Vereinigtes Königreich": "Europe",
     "Kosovo": "Europe", "Palästinensische Gebiete": "Asia", "Hongkong": "Asia",
@@ -28,6 +30,7 @@ MANUAL_MAP = {
     "Französisch-Polynesien": "Oceania", "Réunion": "Africa",
     "Kanaren": "Africa", "Azoren": "Europe", "Madeira": "Europe",
 }
+# Aufteilung Amerika
 NORTH_AMERICA_SET = {
     "usa","vereinigte staaten","united states","us",
     "kanada","canada","mexiko","méxico","mexico",
@@ -36,8 +39,7 @@ NORTH_AMERICA_SET = {
 
 # ----- Hilfsfunktionen -----
 def clean_text(html, limit=550):
-    if not html:
-        return ""
+    if not html: return ""
     text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
     text = re.sub(r"\s+", " ", text)
     return (text[:limit] + " …") if len(text) > limit else text
@@ -53,44 +55,35 @@ def load_seen():
 def save_seen(seen):
     STATE_PATH.write_text(json.dumps(list(seen))[:200000])
 
-def to_continent(name):
-    if not name:
-        return None
-    if name in MANUAL_MAP:
-        return MANUAL_MAP[name]
+def extract_country(title: str, link: str) -> str | None:
+    # z. B. "Albanien: Reise- und Sicherheitshinweise"
+    m = re.match(r"^\s*([^:\-–—]+)", title or "", re.I)
+    if m: return m.group(1).strip()
+    m2 = re.search(r"/ReiseUndSicherheit/([^/\s]+)", link or "", re.I)
+    return m2.group(1).replace("-", " ") if m2 else None
+
+def to_continent(name: str | None) -> str | None:
+    if not name: return None
+    if name in MANUAL_MAP: return MANUAL_MAP[name]
     cont = cc.convert(names=name, to="continent", not_found=None)
     if cont == "Americas":
         c = name.lower()
         return "NorthAmerica" if any(tok in c for tok in NORTH_AMERICA_SET) else "CentralSouthAmerica"
-    return cont if cont in {"Europe", "Asia", "Africa", "Oceania"} else None
+    return cont if cont in {"Europe","Asia","Africa","Oceania"} else None
 
-def forum_post(channel_id, title, content):
+def forum_post(channel_id: str, title: str, content: str):
     url = f"https://discord.com/api/v10/channels/{channel_id}/threads"
     headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
     payload = {"name": title[:95], "auto_archive_duration": 10080, "message": {"content": content}}
     r = requests.post(url, headers=headers, json=payload, timeout=20)
     if r.status_code >= 300:
-        print(f"Discord error {r.status_code}: {r.text}")
-    else:
-        print(f"→ Thread erstellt in Kanal {channel_id}")
+        raise RuntimeError(f"Discord API error {r.status_code}: {r.text}")
 
-# ----- RSS + Dummy -----
 def load_entries():
     feed = feedparser.parse(FEED_URL)
     entries = list(reversed(feed.entries or []))
     print(f"RSS entries: {len(entries)}")
-
-    if entries:
-        return entries
-
-    # Dummy erzeugen, falls RSS leer
-    print("Feed leer → Dummy-Eintrag für Testzwecke erstellt.")
-    e = type("E", (), {})()
-    e.title = "TESTBEITRAG: RSS-Feed leer (Beispielmeldung)"
-    e.link = "https://www.auswaertiges-amt.de/de/ReiseUndSicherheit"
-    e.summary = "Dies ist ein automatischer Testeintrag, um die Bot-Integration zu prüfen."
-    e.id = "dummy-test"
-    return [e]
+    return entries
 
 # ----- Hauptablauf -----
 def main():
@@ -98,37 +91,36 @@ def main():
     entries = load_entries()
     print(f"Entries total: {len(entries)}")
 
+    # Beim ersten Lauf nur IDs merken, um Flooding zu vermeiden
+    if WARM_START and not seen:
+        ids = [getattr(e, "id", getattr(e, "link", "")) for e in entries]
+        save_seen(set(ids)); return
+
     posted = 0
     for e in entries:
         id_ = getattr(e, "id", getattr(e, "link", ""))
-        if id_ in seen:
-            continue
+        if id_ in seen: continue
 
         title = getattr(e, "title", "Reisehinweis")
         link = getattr(e, "link", "")
-        summary = clean_text(getattr(e, "summary", ""))
+        summary = clean_text(getattr(e, "summary", "") or getattr(e, "description", ""))
 
-        # Dummy → nach Europa
-        continent = "Europe" if "TESTBEITRAG" in title else to_continent(title)
-        forum_id = FORUM_IDS.get(continent)
+        country = extract_country(title, link)
+        continent = to_continent(country)
+        forum_id = FORUM_IDS.get(continent) if continent else None
         if not forum_id:
-            continue
+            seen.add(id_); continue
 
         content = f"**{title}**\n{link}\n\n{summary}"
-        print(f"Posting: {title} → {continent}")
+        print(f"Posting: {title} → {continent} ({country})")
         forum_post(forum_id, title, content)
+
         seen.add(id_)
         posted += 1
+        if posted >= MAX_POSTS_PER_RUN: break
+        time.sleep(1.2)
 
-        if posted >= MAX_POSTS_PER_RUN:
-            break
-        time.sleep(1)
-
-    if posted:
-        save_seen(seen)
-        print(f"Fertig: {posted} Beitrag(e) erstellt.")
-    else:
-        print("Keine neuen Beiträge erstellt.")
+    if posted: save_seen(seen)
 
 if __name__ == "__main__":
     main()
