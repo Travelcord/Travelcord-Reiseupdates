@@ -1,5 +1,5 @@
 import os, json, time, pathlib, re, urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime
 import requests, feedparser
 from bs4 import BeautifulSoup
 import country_converter as coco
@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 FEED_URL = "https://www.auswaertiges-amt.de/de/ReiseUndSicherheit/-/RSS"
 STATE_PATH = pathlib.Path("state.json")
 MAX_POSTS_PER_RUN = 10
-WARM_START = False  # auf True stellen, wenn du nur "merken" willst
+WARM_START = False
 
 BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 FORUM_IDS = {
@@ -47,7 +47,7 @@ def load_seen():
     if STATE_PATH.exists():
         try:
             return set(json.loads(STATE_PATH.read_text()))
-        except:
+        except Exception:
             return set()
     return set()
 
@@ -56,21 +56,26 @@ def save_seen(seen):
 
 def extract_country(title: str, link: str) -> str | None:
     m = re.match(r"^\s*([^:\-–—]+)", title or "", re.I)
-    if m: return m.group(1).strip()
+    if m:
+        return m.group(1).strip()
     m2 = re.search(r"/ReiseUndSicherheit/([^/\s]+)", link or "", re.I)
     return m2.group(1).replace("-", " ") if m2 else None
 
 def to_continent(name: str | None) -> str | None:
-    if not name: return None
-    if name in MANUAL_MAP: return MANUAL_MAP[name]
+    if not name:
+        return None
+    if name in MANUAL_MAP:
+        return MANUAL_MAP[name]
     cont = cc.convert(names=name, to="continent", not_found=None)
-    if cont in {"Europe","Asia","Africa","Americas","Oceania"}: return cont
+    if cont in {"Europe", "Asia", "Africa", "Americas", "Oceania"}:
+        return cont
     en = cc.convert(names=name, to="name_short", not_found=None)
     cont = cc.convert(names=en, to="continent", not_found=None) if en else None
-    return cont if cont in {"Europe","Asia","Africa","Americas","Oceania"} else None
+    return cont if cont in {"Europe", "Asia", "Africa", "Americas", "Oceania"} else None
 
 def split_americas(country: str | None) -> str:
-    if not country: return "CentralSouthAmerica"
+    if not country:
+        return "CentralSouthAmerica"
     c = country.lower()
     return "NorthAmerica" if any(tok in c for tok in NORTH_AMERICA_SET) else "CentralSouthAmerica"
 
@@ -88,42 +93,48 @@ def forum_post(channel_id: str, title: str, content: str):
 
 # ----- Feed & Sitemap-Fallback -----
 def load_entries():
+    # 1) RSS prüfen
     f = feedparser.parse(FEED_URL)
     n = len(f.entries or [])
     print(f"RSS entries: {n}")
     if n > 0:
         return list(reversed(f.entries))
 
-    # Sitemap-Fallback: zuverlässig alle Länder
+    # 2) Sitemap-Fallback (prüft mehrere mögliche URLs)
     base = "https://www.auswaertiges-amt.de"
-    sm_index = f"{base}/sitemap.xml"
+    sitemap_candidates = [
+        f"{base}/de/sitemap.xml",
+        f"{base}/sitemap.xml",
+        f"{base}/de/ReiseUndSicherheit/sitemap.xml"
+    ]
     hdr = {"User-Agent": "TravelcordBot", "Accept-Language": "de-DE,de;q=0.9"}
 
     def get(url):
         r = requests.get(url, headers=hdr, timeout=30)
+        if r.status_code == 404:
+            return None
         r.raise_for_status()
         return r.text
 
-    xml_index = get(sm_index)
-    root = ET.fromstring(xml_index)
-    ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
-    sitemaps = [e.find("sm:loc", ns).text for e in root.findall("sm:sitemap", ns) if e.find("sm:loc", ns) is not None]
-    rus_maps = [u for u in sitemaps if "/ReiseUndSicherheit/" in u or "/reiseundsicherheit/" in u.lower()]
-    print(f"Sitemaps total: {len(sitemaps)} | R+S maps: {len(rus_maps)}")
+    xml_text = None
+    used = None
+    for sm in sitemap_candidates:
+        xml_text = get(sm)
+        if xml_text:
+            used = sm
+            break
 
-    urls = []
-    for sm in rus_maps or sitemaps:
-        try:
-            xml_sm = get(sm)
-            rroot = ET.fromstring(xml_sm)
-            for urlnode in rroot.findall("sm:url", ns):
-                loc = urlnode.find("sm:loc", ns)
-                if not loc is None:
-                    u = loc.text
-                    if "/de/ReiseUndSicherheit/" in u:
-                        urls.append(u)
-        except Exception as ex:
-            print(f"map parse fail: {sm} -> {ex}")
+    if not xml_text:
+        print("Keine Sitemap gefunden.")
+        return []
+
+    print(f"Using sitemap: {used}")
+    root = ET.fromstring(xml_text)
+    ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+    urls = [
+        loc.text for loc in root.findall(".//sm:loc", ns)
+        if loc is not None and "/de/ReiseUndSicherheit/" in loc.text
+    ]
 
     urls = list(dict.fromkeys(urls))[:200]
     print(f"Sitemap URLs (R+S): {len(urls)}")
@@ -148,12 +159,14 @@ def main():
 
     if WARM_START and not seen:
         ids = [getattr(e, "id", getattr(e, "link", "")) for e in entries]
-        save_seen(set(ids)); return
+        save_seen(set(ids))
+        return
 
     posted = 0
     for e in entries:
         id_ = getattr(e, "id", getattr(e, "link", ""))
-        if id_ in seen: continue
+        if id_ in seen:
+            continue
 
         title = getattr(e, "title", "Reisehinweis")
         link = getattr(e, "link", "")
@@ -166,7 +179,8 @@ def main():
 
         forum_id = FORUM_IDS.get(continent)
         if not forum_id:
-            seen.add(id_); continue
+            seen.add(id_)
+            continue
 
         content = f"**{title}**\n{link}\n\n{summary}"
         print(f"Posting: {title} → {continent} ({country})")
@@ -174,10 +188,13 @@ def main():
 
         seen.add(id_)
         posted += 1
-        if posted >= MAX_POSTS_PER_RUN: break
+        if posted >= MAX_POSTS_PER_RUN:
+            break
         time.sleep(1.2)
 
-    if posted: save_seen(seen)
+    if posted:
+        save_seen(seen)
 
 if __name__ == "__main__":
     main()
+
