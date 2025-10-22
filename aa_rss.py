@@ -20,7 +20,6 @@ FORUM_IDS = {
     "CentralSouthAmerica": "1425595599914406038",
 }
 
-# CountryConverter
 cc = coco.CountryConverter(include_obsolete=True)
 
 MANUAL_MAP = {
@@ -36,7 +35,7 @@ NORTH_AMERICA_SET = {
     "grönland","greenland","bermuda"
 }
 
-# ----- Helfer -----
+# ----- Helferfunktionen -----
 def clean_text(html, limit=550):
     if not html: return ""
     text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
@@ -77,19 +76,46 @@ def forum_post(channel_id: str, title: str, content: str):
     payload = {
         "name": title[:95],
         "auto_archive_duration": 10080,  # 7 Tage
-        "message": {
-            "content": content
-        }
+        "message": {"content": content}
     }
     r = requests.post(url, headers=headers, json=payload, timeout=20)
     if r.status_code >= 300:
         raise RuntimeError(f"Discord API error {r.status_code}: {r.text}")
 
+# ----- Feed & Fallback -----
+def load_entries():
+    f = feedparser.parse(FEED_URL)
+    n = len(f.entries or [])
+    print(f"RSS entries: {n}")
+    if n > 0:
+        return list(reversed(f.entries))
+
+    # HTML-Fallback: falls RSS leer ist
+    url = "https://www.auswaertiges-amt.de/de/ReiseUndSicherheit/"
+    r = requests.get(url, timeout=20, headers={"User-Agent": "TravelcordBot"})
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+    entries = []
+    for a in soup.select('a[href*="/de/ReiseUndSicherheit/"]'):
+        title = a.get_text(" ", strip=True)
+        link = urllib.parse.urljoin(url, a.get("href", ""))
+        if len(title) < 5 or "Suche" in title or "Kontakt" in title or "Navigation" in title:
+            continue
+        e = type("E", (), {})()
+        e.title = title
+        e.link = link
+        e.summary = ""
+        e.id = link
+        entries.append(e)
+        if len(entries) >= 15:
+            break
+    print(f"HTML fallback entries: {len(entries)}")
+    return entries
+
 # ----- Hauptablauf -----
 def main():
     seen = load_seen()
-    feed = feedparser.parse(FEED_URL)
-    entries = list(reversed(feed.entries or []))
+    entries = load_entries()
     print(f"Entries total: {len(entries)}")
 
     if WARM_START and not seen:
