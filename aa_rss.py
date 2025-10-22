@@ -90,16 +90,22 @@ def load_entries():
     if n > 0:
         return list(reversed(f.entries))
 
-    # HTML-Fallback: falls RSS leer ist
-    url = "https://www.auswaertiges-amt.de/de/ReiseUndSicherheit/"
+    # HTML-Fallback: Länder-Liste von der offiziellen AA-Seite
+    base = "https://www.auswaertiges-amt.de"
+    url = f"{base}/de/ReiseUndSicherheit/laenderreiseliste-node"
     r = requests.get(url, timeout=20, headers={"User-Agent": "TravelcordBot"})
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
+
     entries = []
     for a in soup.select('a[href*="/de/ReiseUndSicherheit/"]'):
         title = a.get_text(" ", strip=True)
-        link = urllib.parse.urljoin(url, a.get("href", ""))
-        if len(title) < 5 or "Suche" in title or "Kontakt" in title or "Navigation" in title:
+        link = urllib.parse.urljoin(base, a.get("href", ""))
+        if not title or len(title) < 3:
+            continue
+        if any(bad in title.lower() for bad in ["navigation", "datenschutz", "barriere", "impressum", "kontakt"]):
+            continue
+        if not link.startswith(f"{base}/de/ReiseUndSicherheit/"):
             continue
         e = type("E", (), {})()
         e.title = title
@@ -107,8 +113,9 @@ def load_entries():
         e.summary = ""
         e.id = link
         entries.append(e)
-        if len(entries) >= 15:
+        if len(entries) >= 25:
             break
+
     print(f"HTML fallback entries: {len(entries)}")
     return entries
 
